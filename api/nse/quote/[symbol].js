@@ -1,6 +1,7 @@
 import https from 'https';
 
-const FETCH_TIMEOUT = 8000;
+const FETCH_TIMEOUT = 10000;
+let nseCookieHeader = '';
 
 function isMarketHours() {
   const now = new Date();
@@ -26,7 +27,7 @@ function isMarketHours() {
   return istTimeMinutes >= marketOpen && istTimeMinutes <= marketClose;
 }
 
-function withTimeout(promise, ms = 8000) {
+function withTimeout(promise, ms = 10000) {
   return Promise.race([
     promise,
     new Promise((_, reject) =>
@@ -35,7 +36,42 @@ function withTimeout(promise, ms = 8000) {
   ]);
 }
 
-function fetchJson(url, timeoutMs = 8000) {
+async function refreshNseCookies() {
+  console.log('[NSE API] Refreshing NSE cookies...');
+  try {
+    const response = await withTimeout(
+      new Promise((resolve, reject) => {
+        https.get('https://www.nseindia.com/', {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          },
+          timeout: 8000,
+        }, (res) => {
+          const cookies = res.headers?.['set-cookie'];
+          if (cookies) {
+            const cookieString = Array.isArray(cookies)
+              ? cookies.map(c => c.split(';')[0]).join('; ')
+              : cookies.split(';')[0];
+            resolve(cookieString);
+          } else {
+            reject(new Error('No Set-Cookie header received'));
+          }
+          res.destroy();
+        }).on('error', reject);
+      }),
+      8000
+    );
+    
+    nseCookieHeader = response;
+    console.log('[NSE API] ✓ Cookies refreshed');
+    return true;
+  } catch (err) {
+    console.warn('[NSE API] Cookie refresh failed:', err.message);
+    return false;
+  }
+}
+
+function fetchJson(url, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
       headers: {
@@ -51,6 +87,7 @@ function fetchJson(url, timeoutMs = 8000) {
         'Sec-Fetch-Mode': 'navigate',
         'Sec-Fetch-Site': 'none',
         'Cache-Control': 'max-age=0',
+        ...(nseCookieHeader ? { 'Cookie': nseCookieHeader } : {}),
       },
       timeout: timeoutMs,
     }, (res) => {
@@ -82,50 +119,86 @@ function fetchJson(url, timeoutMs = 8000) {
   });
 }
 
-function parseNseDirectQuote(symbol, body) {
-  if (!body) {
-    console.log('[NSE API] body is null/undefined');
+function parseNseNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  if (typeof value !== 'string') return 0;
+  const parsed = parseFloat(value.replace(/,/g, '').trim());
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseNseDirectQuote(symbol, payload) {
+  console.log('[NSE API] Parsing NSE response...');
+  
+  // Handle new API response structure: { equityResponse: [...] }
+  const entry = payload?.equityResponse?.[0];
+  
+  if (!entry) {
+    console.log('[NSE API] Missing equityResponse[0] in payload. Available keys:', Object.keys(payload || {}));
     return null;
   }
 
-  if (!body.data) {
-    console.log('[NSE API] body.data is missing:', Object.keys(body));
-    return null;
-  }
+  const meta = entry.metaData || {};
+  const trade = entry.tradeInfo || {};
+  const sec = entry.secInfo || {};
+  const priceInfo = entry.priceInfo || {};
 
-  const info = body.data.priceInfo;
-  if (!info) {
-    console.log('[NSE API] priceInfo is missing');
-    return null;
-  }
+  console.log('[NSE API] Extracted metaData:', { 
+    symbol: meta.symbol, 
+    companyName: meta.companyName,
+    lastPrice: meta.lastPrice,
+    iep: meta.iep
+  });
 
-  const lastPrice = parseFloat(info.lastPrice);
+  const lastPrice = parseNseNumber(trade.lastPrice || meta.lastPrice || meta.iep || 0);
+  const previousClose = parseNseNumber(meta.previousClose || trade.basePrice || 0);
+  const change = parseNseNumber(meta.change !== undefined ? meta.change : (lastPrice - previousClose));
+  const pChange = previousClose > 0 
+    ? parseFloat(((change / previousClose) * 100).toFixed(2)) 
+    : parseNseNumber(meta.pChange || meta.pchange || meta.ic_pchange || 0);
+  const open = parseNseNumber(meta.open || 0);
+  const high = parseNseNumber(meta.dayHigh || priceInfo.dayHigh || 0);
+  const low = parseNseNumber(meta.dayLow || priceInfo.dayLow || 0);
+  const weekHigh52 = parseNseNumber(priceInfo.yearHigh || priceInfo.yearHightDt || 0);
+  const weekLow52 = parseNseNumber(priceInfo.yearLow || 0);
+
+  const priceBand = typeof priceInfo.priceBand === 'string' ? priceInfo.priceBand : '';
+  const [lowerBand, upperBand] = priceBand.split('-').map(v => (v || '').trim());
+
   if (!lastPrice || lastPrice <= 0) {
-    console.log('[NSE API] Invalid lastPrice:', info.lastPrice);
+    console.log('[NSE API] Invalid lastPrice:', lastPrice);
     return null;
   }
 
-  console.log('[NSE API] Parsed quote - lastPrice:', lastPrice);
+  console.log('[NSE API] ✓ Parsed successfully - lastPrice:', lastPrice);
 
   return {
-    symbol: symbol.toUpperCase(),
-    companyName: (body.data.info?.companyName || '').trim() || 'Oil & Natural Gas Corporation Limited',
-    lastPrice: lastPrice,
-    change: parseFloat(info.change) || 0,
-    pChange: parseFloat(info.pChange) || 0,
-    previousClose: parseFloat(info.previousClose) || 0,
-    open: parseFloat(info.open) || 0,
-    high: parseFloat(info.high) || 0,
-    low: parseFloat(info.low) || 0,
-    weekHigh52: parseFloat(info['52WeekHigh']) || 0,
-    weekLow52: parseFloat(info['52WeekLow']) || 0,
-    totalTradedVolume: parseFloat(info.totalTradedVolume) || 0,
-    totalTradedValue: parseFloat(info.totalTradedValue) || 0,
-    upperBand: parseFloat(info.upperBand) || 0,
-    lowerBand: parseFloat(info.lowerBand) || 0,
-    marketCap: body.data.info?.marketCap || null,
-    pe: body.data.info?.pe || null,
-    sectorPE: body.data.info?.sectorPE || null,
+    symbol: (meta.symbol || symbol).toUpperCase(),
+    companyName: meta.companyName || 'Oil & Natural Gas Corporation Limited',
+    industry: sec.basicIndustry || sec.industryInfo || '',
+    lastPrice,
+    change,
+    pChange,
+    previousClose,
+    open,
+    close: lastPrice,
+    high,
+    low,
+    weekHigh52,
+    weekLow52,
+    totalTradedVolume: parseNseNumber(trade.totalTradedVolume || trade.quantitytraded || 0),
+    totalTradedValue: parseNseNumber(trade.totalTradedValue || 0) / 10000000,
+    marketCap: parseNseNumber(trade.totalMarketCap || 0) / 10000000,
+    faceValue: parseNseNumber(trade.faceValue || 5),
+    issuedSize: parseNseNumber(trade.issuedSize || 0) || null,
+    pe: sec.pdSymbolPe || sec.pdSymbolPE || null,
+    sectorPE: sec.pdSectorPe || sec.pdSectorPE || null,
+    sectorIndex: sec.index || '',
+    lastUpdateTime: meta.lastUpdateTime || '',
+    listingDate: sec.listingDate || '',
+    upperBand: upperBand || '',
+    lowerBand: lowerBand || '',
+    upperBandValue: parseNseNumber(upperBand) || null,
+    lowerBandValue: parseNseNumber(lowerBand) || null,
   };
 }
 
@@ -141,10 +214,8 @@ export default async function handler(req, res) {
     return;
   }
 
-  // In Vercel, dynamic route params come through req.query
   let symbol = req.query.symbol;
   
-  // Handle both patterns: /api/nse/quote/ONGC and /api/nse/quote?symbol=ONGC
   if (Array.isArray(symbol)) {
     symbol = symbol[0];
   }
@@ -160,7 +231,10 @@ export default async function handler(req, res) {
   try {
     console.log(`[NSE API] Fetching quote for ${symbol}`);
     
-    // Try direct NSE API with multiple retries
+    // Refresh cookies for first attempt
+    await refreshNseCookies();
+    
+    // Try direct NSE API with retries
     let lastError = null;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
@@ -173,7 +247,7 @@ export default async function handler(req, res) {
           throw new Error('Empty response from NSE API');
         }
 
-        console.log(`[NSE API] Response status: ${response.statusCode}`);
+        console.log(`[NSE API] Response received. Keys:`, Object.keys(response.body));
         
         const quote = parseNseDirectQuote(symbol, response.body);
 
@@ -199,8 +273,12 @@ export default async function handler(req, res) {
       } catch (attemptErr) {
         lastError = attemptErr;
         console.warn(`[NSE API] Attempt ${attempt} failed: ${attemptErr.message}`);
-        if (attempt < 2) {
-          await new Promise(r => setTimeout(r, 1000)); // Wait 1s before retry
+        
+        if (attempt === 1) {
+          // Before second attempt, try refreshing cookies
+          console.log('[NSE API] Refreshing cookies and retrying...');
+          await refreshNseCookies();
+          await new Promise(r => setTimeout(r, 500)); // Wait 500ms before retry
         }
       }
     }
@@ -234,7 +312,7 @@ export default async function handler(req, res) {
       error: err.message,
     };
 
-    // Return 200 with demo data so frontend knows this is intentional, not a server error
+    // Return 200 with demo data so frontend knows this is intentional
     res.status(200).json(demoResponse);
   }
 }
