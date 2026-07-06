@@ -1,0 +1,125 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Playfair+Display:wght@500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222 25% 5%;
+    --foreground: 210 20% 94%;
+    --card: 220 20% 8%;
+    --card-foreground: 210 20% 94%;
+    --popover: 220 20% 8%;
+    --popover-foreground: 210 20% 94%;
+    --primary: 3 48% 51%;
+    --primary-foreground: 210 20% 94%;
+    --secondary: 220 15% 14%;
+    --secondary-foreground: 210 20% 94%;
+    --muted: 220 15% 14%;
+    --muted-foreground: 215 12% 58%;
+    --accent: 40 60% 50%;
+    --accent-foreground: 222 25% 5%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 20% 94%;
+    --border: 220 15% 16%;
+    --input: 220 15% 16%;
+    --ring: 3 48% 51%;
+    --radius: 0.5rem;
+
+    --steel: #5b8aa6;
+    --steel-soft: rgba(91,138,166,0.15);
+    --brass: #c89b3c;
+    --brass-soft: rgba(200,155,60,0.15);
+    --maroon: #b3433f;
+    --maroon-soft: rgba(179,67,63,0.15);
+    --emerald: #5b9c6e;
+    --emerald-soft: rgba(91,156,110,0.15);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Inter', sans-serif;
+    font-size: 15px;
+    background-image:
+      radial-gradient(ellipse 1200px 600px at 15% -10%, rgba(179,67,63,0.06), transparent 60%),
+      radial-gradient(ellipse 1000px 700px at 85% 5%, rgba(200,155,60,0.04), transparent 60%);
+    background-attachment: fixed;
+  }
+}
+
+@layer utilities {
+  .font-display {
+    font-family: 'Playfair Display', serif;
+  }
+
+  .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .text-gradient {
+    background: linear-gradient(135deg, #c89b3c 0%, #d4b84a 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .glass-panel {
+    background: rgba(16, 20, 28, 0.6);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(42, 49, 60, 0.8);
+  }
+
+  .glow-brass {
+    box-shadow: 0 0 20px rgba(200, 155, 60, 0.08);
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 3px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground));
+  }
+}
+
+/* Recharts tooltip custom styles */
+.recharts-tooltip-wrapper {
+  outline: none !important;
+}
+
+.recharts-default-tooltip {
+  background: hsl(220, 20%, 8%) !important;
+  border: 1px solid hsl(220, 15%, 16%) !important;
+  border-radius: 6px !important;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important;
+}
+
+.recharts-tooltip-label {
+  color: hsl(210, 20%, 94%) !important;
+  font-weight: 600 !important;
+}
+
+.recharts-tooltip-item {
+  color: hsl(215, 12%, 58%) !important;
+}
