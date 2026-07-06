@@ -126,79 +126,103 @@ function parseNseNumber(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+// Handle multiple possible NSE API response structures
 function parseNseDirectQuote(symbol, payload) {
   console.log('[NSE API] Parsing NSE response...');
+  console.log('[NSE API] Payload keys:', Object.keys(payload || {}));
   
-  // Handle new API response structure: { equityResponse: [...] }
-  const entry = payload?.equityResponse?.[0];
+  let entry = null;
+  
+  // Try structure 1: { equityResponse: [...] }
+  if (payload?.equityResponse && Array.isArray(payload.equityResponse) && payload.equityResponse.length > 0) {
+    console.log('[NSE API] ✓ Found equityResponse structure');
+    entry = payload.equityResponse[0];
+  }
+  // Try structure 2: { data: { priceInfo: ... } }
+  else if (payload?.data) {
+    console.log('[NSE API] ✓ Found data structure');
+    entry = payload.data;
+  }
+  // Try structure 3: Direct response at root level
+  else if (payload?.metaData || payload?.tradeInfo) {
+    console.log('[NSE API] ✓ Found root-level structure');
+    entry = payload;
+  }
   
   if (!entry) {
-    console.log('[NSE API] Missing equityResponse[0] in payload. Available keys:', Object.keys(payload || {}));
+    console.log('[NSE API] ✗ No recognized structure found');
     return null;
   }
 
-  const meta = entry.metaData || {};
-  const trade = entry.tradeInfo || {};
-  const sec = entry.secInfo || {};
-  const priceInfo = entry.priceInfo || {};
+  // Extract data from whatever structure we found
+  const meta = entry.metaData || entry.meta || entry;
+  const trade = entry.tradeInfo || entry.trade || {};
+  const sec = entry.secInfo || entry.sec || {};
+  const priceInfo = entry.priceInfo || entry.priceinfo || {};
 
-  console.log('[NSE API] Extracted metaData:', { 
-    symbol: meta.symbol, 
-    companyName: meta.companyName,
-    lastPrice: meta.lastPrice,
-    iep: meta.iep
+  console.log('[NSE API] Extracted data:', {
+    metaKeys: Object.keys(meta).slice(0, 5),
+    tradeKeys: Object.keys(trade).slice(0, 5),
   });
 
-  const lastPrice = parseNseNumber(trade.lastPrice || meta.lastPrice || meta.iep || 0);
+  // Get lastPrice from multiple possible locations
+  let lastPrice = null;
+  if (trade.lastPrice) lastPrice = parseNseNumber(trade.lastPrice);
+  else if (meta.lastPrice) lastPrice = parseNseNumber(meta.lastPrice);
+  else if (meta.iep) lastPrice = parseNseNumber(meta.iep);
+  else if (meta.ltp) lastPrice = parseNseNumber(meta.ltp);
+  else if (meta.lastPrice) lastPrice = parseNseNumber(meta.lastPrice);
+
+  if (!lastPrice || lastPrice <= 0) {
+    console.log('[NSE API] ✗ Could not find valid lastPrice');
+    console.log('[NSE API] Checked values:', {
+      trade_lastPrice: trade.lastPrice,
+      meta_lastPrice: meta.lastPrice,
+      meta_iep: meta.iep,
+      meta_ltp: meta.ltp,
+    });
+    return null;
+  }
+
   const previousClose = parseNseNumber(meta.previousClose || trade.basePrice || 0);
   const change = parseNseNumber(meta.change !== undefined ? meta.change : (lastPrice - previousClose));
   const pChange = previousClose > 0 
     ? parseFloat(((change / previousClose) * 100).toFixed(2)) 
     : parseNseNumber(meta.pChange || meta.pchange || meta.ic_pchange || 0);
-  const open = parseNseNumber(meta.open || 0);
-  const high = parseNseNumber(meta.dayHigh || priceInfo.dayHigh || 0);
-  const low = parseNseNumber(meta.dayLow || priceInfo.dayLow || 0);
-  const weekHigh52 = parseNseNumber(priceInfo.yearHigh || priceInfo.yearHightDt || 0);
-  const weekLow52 = parseNseNumber(priceInfo.yearLow || 0);
+
+  console.log('[NSE API] ✓ Parsed successfully - lastPrice:', lastPrice);
+
+  const companyName = meta.companyName || meta.company || meta.stockName || 'Oil & Natural Gas Corporation Limited';
+  const symbol_parsed = meta.symbol || meta.stock || symbol;
 
   const priceBand = typeof priceInfo.priceBand === 'string' ? priceInfo.priceBand : '';
   const [lowerBand, upperBand] = priceBand.split('-').map(v => (v || '').trim());
 
-  if (!lastPrice || lastPrice <= 0) {
-    console.log('[NSE API] Invalid lastPrice:', lastPrice);
-    return null;
-  }
-
-  console.log('[NSE API] ✓ Parsed successfully - lastPrice:', lastPrice);
-
   return {
-    symbol: (meta.symbol || symbol).toUpperCase(),
-    companyName: meta.companyName || 'Oil & Natural Gas Corporation Limited',
-    industry: sec.basicIndustry || sec.industryInfo || '',
+    symbol: symbol_parsed.toUpperCase(),
+    companyName: companyName.trim() || 'Oil & Natural Gas Corporation Limited',
+    industry: sec.basicIndustry || sec.industryInfo || sec.industry || '',
     lastPrice,
     change,
     pChange,
     previousClose,
-    open,
+    open: parseNseNumber(meta.open || 0),
     close: lastPrice,
-    high,
-    low,
-    weekHigh52,
-    weekLow52,
-    totalTradedVolume: parseNseNumber(trade.totalTradedVolume || trade.quantitytraded || 0),
-    totalTradedValue: parseNseNumber(trade.totalTradedValue || 0) / 10000000,
+    high: parseNseNumber(meta.dayHigh || meta.high || priceInfo.dayHigh || 0),
+    low: parseNseNumber(meta.dayLow || meta.low || priceInfo.dayLow || 0),
+    weekHigh52: parseNseNumber(priceInfo.yearHigh || priceInfo.yearHighDt || priceInfo['52WeekHigh'] || 0),
+    weekLow52: parseNseNumber(priceInfo.yearLow || priceInfo['52WeekLow'] || 0),
+    totalTradedVolume: parseNseNumber(trade.totalTradedVolume || trade.quantitytraded || trade.volume || 0),
+    totalTradedValue: parseNseNumber(trade.totalTradedValue || trade.value || 0) / 10000000,
     marketCap: parseNseNumber(trade.totalMarketCap || 0) / 10000000,
     faceValue: parseNseNumber(trade.faceValue || 5),
-    issuedSize: parseNseNumber(trade.issuedSize || 0) || null,
-    pe: sec.pdSymbolPe || sec.pdSymbolPE || null,
-    sectorPE: sec.pdSectorPe || sec.pdSectorPE || null,
-    sectorIndex: sec.index || '',
-    lastUpdateTime: meta.lastUpdateTime || '',
+    pe: sec.pdSymbolPe || sec.pdSymbolPE || sec.pe || null,
+    sectorPE: sec.pdSectorPe || sec.pdSectorPE || sec.sectorPE || null,
+    sectorIndex: sec.index || sec.indexName || '',
+    lastUpdateTime: meta.lastUpdateTime || meta.updateTime || '',
     listingDate: sec.listingDate || '',
     upperBand: upperBand || '',
     lowerBand: lowerBand || '',
-    upperBandValue: parseNseNumber(upperBand) || null,
-    lowerBandValue: parseNseNumber(lowerBand) || null,
   };
 }
 
