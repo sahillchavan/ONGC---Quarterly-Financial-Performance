@@ -39,26 +39,42 @@ function fetchJson(url, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://www.nseindia.com/',
+        'Accept-Language': 'en-US,en;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': 'https://www.nseindia.com/get-quote/equity?symbol=ONGC',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Cache-Control': 'max-age=0',
       },
       timeout: timeoutMs,
     }, (res) => {
       let data = '';
       res.setEncoding('utf8');
-      res.on('data', chunk => { data += chunk; });
+      
+      res.on('data', chunk => { 
+        data += chunk; 
+      });
+      
       res.on('end', () => {
         try {
-          resolve({ statusCode: res.statusCode, body: JSON.parse(data) });
+          const parsed = JSON.parse(data);
+          resolve({ statusCode: res.statusCode, body: parsed });
         } catch (e) {
-          reject(new Error('Invalid JSON response'));
+          reject(new Error(`JSON parse error: ${e.message}`));
         }
       });
     });
 
-    req.on('error', reject);
+    req.on('error', (e) => {
+      reject(new Error(`HTTP request error: ${e.message}`));
+    });
+    
     req.on('timeout', () => {
       req.destroy();
       reject(new Error(`Request timed out after ${timeoutMs}ms`));
@@ -67,15 +83,34 @@ function fetchJson(url, timeoutMs = 8000) {
 }
 
 function parseNseDirectQuote(symbol, body) {
-  if (!body || !body.data || !body.data.priceInfo) {
+  if (!body) {
+    console.log('[NSE API] body is null/undefined');
+    return null;
+  }
+
+  if (!body.data) {
+    console.log('[NSE API] body.data is missing:', Object.keys(body));
     return null;
   }
 
   const info = body.data.priceInfo;
+  if (!info) {
+    console.log('[NSE API] priceInfo is missing');
+    return null;
+  }
+
+  const lastPrice = parseFloat(info.lastPrice);
+  if (!lastPrice || lastPrice <= 0) {
+    console.log('[NSE API] Invalid lastPrice:', info.lastPrice);
+    return null;
+  }
+
+  console.log('[NSE API] Parsed quote - lastPrice:', lastPrice);
+
   return {
     symbol: symbol.toUpperCase(),
-    companyName: body.data.info?.companyName || '',
-    lastPrice: parseFloat(info.lastPrice) || 0,
+    companyName: (body.data.info?.companyName || '').trim() || 'Oil & Natural Gas Corporation Limited',
+    lastPrice: lastPrice,
     change: parseFloat(info.change) || 0,
     pChange: parseFloat(info.pChange) || 0,
     previousClose: parseFloat(info.previousClose) || 0,
@@ -84,8 +119,8 @@ function parseNseDirectQuote(symbol, body) {
     low: parseFloat(info.low) || 0,
     weekHigh52: parseFloat(info['52WeekHigh']) || 0,
     weekLow52: parseFloat(info['52WeekLow']) || 0,
-    totalTradedVolume: info.totalTradedVolume || 0,
-    totalTradedValue: info.totalTradedValue || 0,
+    totalTradedVolume: parseFloat(info.totalTradedVolume) || 0,
+    totalTradedValue: parseFloat(info.totalTradedValue) || 0,
     upperBand: parseFloat(info.upperBand) || 0,
     lowerBand: parseFloat(info.lowerBand) || 0,
     marketCap: body.data.info?.marketCap || null,
@@ -106,41 +141,76 @@ export default async function handler(req, res) {
     return;
   }
 
-  const { symbol } = req.query;
+  // In Vercel, dynamic route params come through req.query
+  let symbol = req.query.symbol;
+  
+  // Handle both patterns: /api/nse/quote/ONGC and /api/nse/quote?symbol=ONGC
+  if (Array.isArray(symbol)) {
+    symbol = symbol[0];
+  }
 
-  if (!symbol || symbol.toUpperCase() !== 'ONGC') {
+  if (!symbol) {
+    return res.status(400).json({ error: 'Symbol parameter is required' });
+  }
+
+  if (symbol.toUpperCase() !== 'ONGC') {
     return res.status(403).json({ error: 'Only ONGC data is available' });
   }
 
   try {
-    // Try direct NSE API
-    const directUrl = `https://www.nseindia.com/api/NextApi/apiClient/GetQuoteApi?functionName=getSymbolData&marketType=N&series=EQ&symbol=${encodeURIComponent(symbol.toUpperCase())}`;
+    console.log(`[NSE API] Fetching quote for ${symbol}`);
     
-    const response = await withTimeout(fetchJson(directUrl, FETCH_TIMEOUT), FETCH_TIMEOUT);
-    const quote = parseNseDirectQuote(symbol, response.body);
+    // Try direct NSE API with multiple retries
+    let lastError = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const directUrl = `https://www.nseindia.com/api/NextApi/apiClient/GetQuoteApi?functionName=getSymbolData&marketType=N&series=EQ&symbol=${encodeURIComponent(symbol.toUpperCase())}`;
+        
+        console.log(`[NSE API] Attempt ${attempt}: Fetching from NSE...`);
+        const response = await withTimeout(fetchJson(directUrl, FETCH_TIMEOUT), FETCH_TIMEOUT);
+        
+        if (!response || !response.body) {
+          throw new Error('Empty response from NSE API');
+        }
 
-    if (quote && quote.lastPrice > 0) {
-      const marketOpen = isMarketHours();
-      return res.status(200).json({
-        ...quote,
-        _source: 'NSE Direct API',
-        _fetchedAt: new Date().toISOString(),
-        _priceAsOf: new Date().toLocaleTimeString('en-IN', { 
-          timeZone: 'Asia/Kolkata', 
-          hour: '2-digit', 
-          minute: '2-digit', 
-          second: '2-digit' 
-        }),
-        _stale: !marketOpen,
-      });
+        console.log(`[NSE API] Response status: ${response.statusCode}`);
+        
+        const quote = parseNseDirectQuote(symbol, response.body);
+
+        if (quote && quote.lastPrice > 0) {
+          const marketOpen = isMarketHours();
+          console.log(`[NSE API] ✅ Success! lastPrice: ₹${quote.lastPrice}`);
+          
+          return res.status(200).json({
+            ...quote,
+            _source: 'NSE Direct API',
+            _fetchedAt: new Date().toISOString(),
+            _priceAsOf: new Date().toLocaleTimeString('en-IN', { 
+              timeZone: 'Asia/Kolkata', 
+              hour: '2-digit', 
+              minute: '2-digit', 
+              second: '2-digit' 
+            }),
+            _stale: !marketOpen,
+          });
+        }
+
+        throw new Error('Invalid or missing price data from NSE API');
+      } catch (attemptErr) {
+        lastError = attemptErr;
+        console.warn(`[NSE API] Attempt ${attempt} failed: ${attemptErr.message}`);
+        if (attempt < 2) {
+          await new Promise(r => setTimeout(r, 1000)); // Wait 1s before retry
+        }
+      }
     }
 
-    throw new Error('Invalid quote data from direct API');
+    throw lastError || new Error('All NSE API attempts failed');
   } catch (err) {
-    console.error('[NSE] Fetch error:', err.message);
+    console.error(`[NSE API] ❌ Final error:`, err.message);
     
-    // Return demo data as fallback
-    return res.status(200).json({
+    // Return demo data with error indicator
+    const demoResponse = {
       symbol: 'ONGC',
       companyName: 'Oil & Natural Gas Corporation Limited',
       lastPrice: 325.50,
@@ -161,7 +231,10 @@ export default async function handler(req, res) {
       _timeout: true,
       _stale: true,
       _fetchedAt: new Date().toISOString(),
-      error: 'NSE API temporarily unavailable. Showing cached data.',
-    });
+      error: err.message,
+    };
+
+    // Return 200 with demo data so frontend knows this is intentional, not a server error
+    res.status(200).json(demoResponse);
   }
 }
