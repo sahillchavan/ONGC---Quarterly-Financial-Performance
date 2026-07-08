@@ -12,6 +12,9 @@ let lastKnownSectorPe = '7.95';
 let lastKnownMarketCap = 307462;
 let lastKnownUpperBand = '';
 let lastKnownLowerBand = '';
+let cachedQuote = null;
+let cachedQuoteTime = 0;
+const CACHE_TTL = 3000; // 3 seconds cache TTL
 
 // ── Market Hours ────────────────────────────────────────────────────────────
 function isMarketHours() {
@@ -522,81 +525,81 @@ export default async function handler(req, res) {
 
   symbol = symbol.toUpperCase();
   const marketOpen = isMarketHours();
+  const forceRefresh = req.query.force === '1';
 
-  // Define data sources in priority order
-  const sources = [
-    { name: 'nse-direct-api', fn: () => fetchFromNseDirectApi(symbol) },
-    { name: 'yahoo-finance', fn: () => fetchFromYahooFinance(symbol) },
-    { name: 'google-finance', fn: () => fetchFromGoogleFinance(symbol) },
-  ];
-
-  const errors = [];
-  let primaryQuote = null;
-
-  for (const source of sources) {
-    try {
-      console.log(`[NSE API] ━━━ Attempting ${source.name}...`);
-      const quote = await source.fn();
-
-      if (quote && isValidPrice(quote.lastPrice)) {
-        console.log(`[NSE API] ✅ Success from ${source.name}: ₹${quote.lastPrice}`);
-        primaryQuote = quote;
-
-        // Save last known metadata if present in the successful response
-        if (quote.pe && quote.pe !== '0' && quote.pe !== '') lastKnownPe = quote.pe;
-        if (quote.sectorPE && quote.sectorPE !== '0' && quote.sectorPE !== '') lastKnownSectorPe = quote.sectorPE;
-        if (quote.marketCap && quote.marketCap > 0) lastKnownMarketCap = quote.marketCap;
-        if (quote.upperBand && quote.upperBand !== '') lastKnownUpperBand = quote.upperBand;
-        if (quote.lowerBand && quote.lowerBand !== '') lastKnownLowerBand = quote.lowerBand;
-
-        // Supplement missing metadata fields from warm cache
-        if ((!primaryQuote.pe || primaryQuote.pe === '') && lastKnownPe) {
-          primaryQuote.pe = lastKnownPe;
-        }
-        if ((!primaryQuote.sectorPE || primaryQuote.sectorPE === '') && lastKnownSectorPe) {
-          primaryQuote.sectorPE = lastKnownSectorPe;
-        }
-        if ((!primaryQuote.marketCap || primaryQuote.marketCap === 0 || primaryQuote.marketCap === null) && lastKnownMarketCap) {
-          primaryQuote.marketCap = lastKnownMarketCap;
-        }
-        if ((!primaryQuote.upperBand || primaryQuote.upperBand === '') && lastKnownUpperBand) {
-          primaryQuote.upperBand = lastKnownUpperBand;
-        }
-        if ((!primaryQuote.lowerBand || primaryQuote.lowerBand === '') && lastKnownLowerBand) {
-          primaryQuote.lowerBand = lastKnownLowerBand;
-        }
-
-        return res.status(200).json({
-          ...primaryQuote,
-          _source: source.name,
-          _fetchedAt: new Date().toISOString(),
-          _priceAsOf: new Date().toLocaleTimeString('en-IN', {
-            timeZone: 'Asia/Kolkata',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-          }),
-          _stale: !marketOpen,
-          _attemptedSources: sources.map(s => s.name).slice(0, sources.indexOf(source) + 1),
-          _failedSources: errors.map(e => e.source),
-        });
-      }
-
-      throw new Error(`${source.name} returned invalid price`);
-    } catch (err) {
-      console.warn(`[NSE API] ✗ ${source.name} failed: ${err.message}`);
-      errors.push({ source: source.name, error: err.message });
-    }
+  // 1. Check warm lambda cache to prevent rate-limiting and conflict issues
+  if (!forceRefresh && cachedQuote && (Date.now() - cachedQuoteTime) < CACHE_TTL) {
+    console.log('[NSE API] Serving cached quote');
+    return res.status(200).json({
+      ...cachedQuote,
+      _cached: true,
+      _stale: !marketOpen,
+    });
   }
 
-  // All sources failed — return error (NO hardcoded demo data!)
-  console.error('[NSE API] ❌ All sources failed:', errors);
+  // 2. Fetch directly from official NSE GetQuoteApi (Single source of truth)
+  try {
+    console.log('[NSE API] ━━━ Attempting fetch from nse-direct-api (GetQuoteApi)...');
+    const quote = await fetchFromNseDirectApi(symbol);
 
-  return res.status(502).json({
-    error: 'All price sources failed',
-    message: 'Unable to fetch current stock price from any source. Please try again shortly.',
-    _failedSources: errors,
-    _fetchedAt: new Date().toISOString(),
-  });
+    if (quote && isValidPrice(quote.lastPrice)) {
+      console.log(`[NSE API] ✅ Success: ₹${quote.lastPrice}`);
+
+      // Save last known metadata fields
+      if (quote.pe && quote.pe !== '0' && quote.pe !== '') lastKnownPe = quote.pe;
+      if (quote.sectorPE && quote.sectorPE !== '0' && quote.sectorPE !== '') lastKnownSectorPe = quote.sectorPE;
+      if (quote.marketCap && quote.marketCap > 0) lastKnownMarketCap = quote.marketCap;
+      if (quote.upperBand && quote.upperBand !== '') lastKnownUpperBand = quote.upperBand;
+      if (quote.lowerBand && quote.lowerBand !== '') lastKnownLowerBand = quote.lowerBand;
+
+      // Supplement any missing metadata
+      if ((!quote.pe || quote.pe === '') && lastKnownPe) quote.pe = lastKnownPe;
+      if ((!quote.sectorPE || quote.sectorPE === '') && lastKnownSectorPe) quote.sectorPE = lastKnownSectorPe;
+      if ((!quote.marketCap || quote.marketCap === 0 || quote.marketCap === null) && lastKnownMarketCap) quote.marketCap = lastKnownMarketCap;
+      if ((!quote.upperBand || quote.upperBand === '') && lastKnownUpperBand) quote.upperBand = lastKnownUpperBand;
+      if ((!quote.lowerBand || quote.lowerBand === '') && lastKnownLowerBand) quote.lowerBand = lastKnownLowerBand;
+
+      const formattedQuote = {
+        ...quote,
+        _fetchedAt: new Date().toISOString(),
+        _priceAsOf: new Date().toLocaleTimeString('en-IN', {
+          timeZone: 'Asia/Kolkata',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        }),
+        _stale: !marketOpen,
+      };
+
+      // Store in warm cache
+      cachedQuote = formattedQuote;
+      cachedQuoteTime = Date.now();
+
+      return res.status(200).json(formattedQuote);
+    }
+
+    throw new Error('nse-direct-api returned invalid price data');
+  } catch (err) {
+    console.warn(`[NSE API] ✗ nse-direct-api failed: ${err.message}`);
+
+    // 3. Fallback to cached quote (even if expired) to prevent failing the page load
+    if (cachedQuote) {
+      console.log('[NSE API] ⚠️ Serving stale cached quote after API failure');
+      return res.status(200).json({
+        ...cachedQuote,
+        _cached: true,
+        _stale: true,
+        _staleReason: 'api-failure',
+      });
+    }
+
+    // 4. If everything fails and no cache exists, return 502
+    console.error('[NSE API] ❌ Live quote failed and no cached data is available');
+    return res.status(502).json({
+      error: 'Failed to fetch live stock price',
+      message: err.message,
+      _fetchedAt: new Date().toISOString(),
+    });
+  }
 }
 
